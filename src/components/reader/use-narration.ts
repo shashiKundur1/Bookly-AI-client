@@ -19,6 +19,19 @@ export interface NarrationSentence {
   words: WordTiming[];
 }
 
+interface AudioSegment {
+  ctxStart: number;
+  audioStart: number;
+  duration: number;
+}
+
+interface QueuedChunk {
+  chunk: NarrationChunk;
+  sentences: NarrationSentence[];
+  segments: AudioSegment[];
+  audioLength: number;
+}
+
 interface NarrationOptions {
   bookId: string;
   page: number;
@@ -35,6 +48,7 @@ interface ServerMessage {
   blocks?: number[];
   speech?: string;
   sample_rate?: number;
+  chunk_id?: string;
   text?: string;
   offset?: number;
   words?: WordTiming[];
@@ -54,9 +68,8 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
   const socketRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
   const sourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const queueRef = useRef<QueuedChunk[]>([]);
   const nextTimeRef = useRef(0);
-  const chunkStartRef = useRef(0);
-  const chunkStartPendingRef = useRef(false);
   const sampleRateRef = useRef(24000);
   const pendingAckRef = useRef<string | null>(null);
   const endedRef = useRef(false);
@@ -66,8 +79,8 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
   const voiceRef = useRef(voice);
   const rateRef = useRef(rate);
   const setPageRef = useRef(setPage);
-  const currentChunkRef = useRef<NarrationChunk | null>(null);
-  const sentencesRef = useRef<NarrationSentence[]>([]);
+  const heardChunkRef = useRef<NarrationChunk | null>(null);
+  const sentenceCountRef = useRef(-1);
 
   pageRef.current = page;
   setPageRef.current = setPage;
@@ -81,12 +94,12 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
       }
     });
     sourcesRef.current = [];
+    queueRef.current = [];
     const ctx = ctxRef.current;
     nextTimeRef.current = ctx ? ctx.currentTime : 0;
-    chunkStartPendingRef.current = true;
     pendingAckRef.current = null;
     endedRef.current = false;
-    sentencesRef.current = [];
+    sentenceCountRef.current = -1;
     setSentences([]);
     setActiveSentence(-1);
     setWordIndex(-1);
@@ -111,16 +124,17 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
     if (ctx && ctx.state !== "closed") {
       ctx.close().catch(() => {});
     }
+    heardChunkRef.current = null;
     setPlaying(false);
     setLoading(false);
     setCurrentChunk(null);
-    currentChunkRef.current = null;
     closingRef.current = false;
   }, [flushAudio]);
 
   const schedulePcm = useCallback((buffer: ArrayBuffer) => {
     const ctx = ctxRef.current;
-    if (!ctx || buffer.byteLength < 2) return;
+    const target = queueRef.current[queueRef.current.length - 1];
+    if (!ctx || !target || buffer.byteLength < 2) return;
     const ints = new Int16Array(buffer);
     const floats = new Float32Array(ints.length);
     for (let index = 0; index < ints.length; index++) {
@@ -132,16 +146,18 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
     source.buffer = audioBuffer;
     source.connect(ctx.destination);
     const startAt = Math.max(nextTimeRef.current, ctx.currentTime + 0.05);
-    if (chunkStartPendingRef.current) {
-      chunkStartRef.current = startAt;
-      chunkStartPendingRef.current = false;
-    }
     source.start(startAt);
     nextTimeRef.current = startAt + audioBuffer.duration;
     sourcesRef.current.push(source);
-    if (sourcesRef.current.length > 64) {
-      sourcesRef.current.splice(0, sourcesRef.current.length - 64);
+    if (sourcesRef.current.length > 96) {
+      sourcesRef.current.splice(0, sourcesRef.current.length - 96);
     }
+    target.segments.push({
+      ctxStart: startAt,
+      audioStart: target.audioLength,
+      duration: audioBuffer.duration,
+    });
+    target.audioLength += audioBuffer.duration;
     setLoading(false);
   }, []);
 
@@ -158,29 +174,30 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
         return;
       }
       if (message.type === "chunk" && message.id && message.page) {
-        const chunk: NarrationChunk = {
-          id: message.id,
-          page: message.page,
-          blocks: message.blocks ?? [],
-          speech: message.speech ?? "",
-        };
-        currentChunkRef.current = chunk;
-        setCurrentChunk(chunk);
         sampleRateRef.current = message.sample_rate || 24000;
-        chunkStartPendingRef.current = true;
-        sentencesRef.current = [];
-        setSentences([]);
-        setActiveSentence(-1);
-        setWordIndex(-1);
-        if (message.page !== pageRef.current) {
-          setPageRef.current(message.page);
+        queueRef.current.push({
+          chunk: {
+            id: message.id,
+            page: message.page,
+            blocks: message.blocks ?? [],
+            speech: message.speech ?? "",
+          },
+          sentences: [],
+          segments: [],
+          audioLength: 0,
+        });
+      } else if (message.type === "sentence" && message.chunk_id) {
+        for (let index = queueRef.current.length - 1; index >= 0; index--) {
+          const entry = queueRef.current[index];
+          if (entry.chunk.id === message.chunk_id) {
+            entry.sentences.push({
+              text: message.text ?? "",
+              offset: message.offset ?? 0,
+              words: message.words ?? [],
+            });
+            break;
+          }
         }
-      } else if (message.type === "sentence") {
-        sentencesRef.current = [
-          ...sentencesRef.current,
-          { text: message.text ?? "", offset: message.offset ?? 0, words: message.words ?? [] },
-        ];
-        setSentences(sentencesRef.current);
       } else if (message.type === "chunk_end" && message.id) {
         pendingAckRef.current = message.id;
       } else if (message.type === "end") {
@@ -203,8 +220,8 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
       socket.send(
         JSON.stringify({
           type: "start",
-          chunk: currentChunkRef.current?.id,
-          page: currentChunkRef.current ? undefined : pageRef.current,
+          chunk: heardChunkRef.current?.id,
+          page: heardChunkRef.current ? undefined : pageRef.current,
           voice: voiceRef.current,
           speed: rateRef.current,
         }),
@@ -253,9 +270,10 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
     (direction: number) => {
       const socket = socketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      const anchor = heardChunkRef.current?.id;
       flushAudio();
       setLoading(true);
-      socket.send(JSON.stringify({ type: "seek", direction }));
+      socket.send(JSON.stringify({ type: "seek", chunk: anchor, direction }));
     },
     [flushAudio],
   );
@@ -266,7 +284,8 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
       const ctx = ctxRef.current;
       const socket = socketRef.current;
       if (!ctx) return;
-      const ahead = nextTimeRef.current - ctx.currentTime;
+      const now = ctx.currentTime;
+      const ahead = nextTimeRef.current - now;
       if (
         pendingAckRef.current !== null &&
         socket !== null &&
@@ -281,18 +300,56 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
         wantsPlayRef.current = false;
         setPlaying(false);
       }
-      if (chunkStartPendingRef.current) return;
-      const elapsed = ctx.currentTime - chunkStartRef.current;
-      if (elapsed < 0) return;
-      const list = sentencesRef.current;
-      let active = -1;
+
+      const queue = queueRef.current;
+      let activeIndex = -1;
+      for (let index = 0; index < queue.length; index++) {
+        const first = queue[index].segments[0];
+        if (!first || first.ctxStart > now) break;
+        activeIndex = index;
+      }
+      if (activeIndex < 0) return;
+      if (activeIndex > 0) {
+        queue.splice(0, activeIndex);
+      }
+      const active = queue[0];
+
+      if (heardChunkRef.current?.id !== active.chunk.id) {
+        heardChunkRef.current = active.chunk;
+        sentenceCountRef.current = -1;
+        setCurrentChunk(active.chunk);
+        setActiveSentence(-1);
+        setWordIndex(-1);
+        if (active.chunk.page !== pageRef.current) {
+          setPageRef.current(active.chunk.page);
+        }
+      }
+      if (sentenceCountRef.current !== active.sentences.length) {
+        sentenceCountRef.current = active.sentences.length;
+        setSentences([...active.sentences]);
+      }
+
+      let elapsed = active.audioLength;
+      for (const segment of active.segments) {
+        if (now < segment.ctxStart) {
+          elapsed = segment.audioStart;
+          break;
+        }
+        if (now < segment.ctxStart + segment.duration) {
+          elapsed = segment.audioStart + (now - segment.ctxStart);
+          break;
+        }
+      }
+
+      const list = active.sentences;
+      let activeIdx = -1;
       for (let index = 0; index < list.length; index++) {
-        if (list[index].offset <= elapsed) active = index;
+        if (list[index].offset <= elapsed) activeIdx = index;
         else break;
       }
-      setActiveSentence(active);
-      if (active >= 0) {
-        const words = list[active].words;
+      setActiveSentence(activeIdx);
+      if (activeIdx >= 0) {
+        const words = list[activeIdx].words;
         let current = -1;
         for (let index = 0; index < words.length; index++) {
           if (words[index].start <= elapsed) current = index;
@@ -302,7 +359,7 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
       } else {
         setWordIndex(-1);
       }
-    }, 150);
+    }, 100);
     return () => clearInterval(ticker);
   }, [enabled]);
 
@@ -316,11 +373,11 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({ type: "voice", voice }));
     socket.send(JSON.stringify({ type: "speed", speed: rate }));
-    const chunk = currentChunkRef.current;
-    if (chunk) {
+    const anchor = heardChunkRef.current;
+    if (anchor) {
       flushAudio();
       setLoading(true);
-      socket.send(JSON.stringify({ type: "seek", chunk: chunk.id }));
+      socket.send(JSON.stringify({ type: "seek", chunk: anchor.id }));
     }
   }, [voice, rate, enabled, flushAudio]);
 
