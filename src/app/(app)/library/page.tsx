@@ -20,6 +20,7 @@ import type { Book, BookFilters, BookPriority } from "@/lib/types";
 import { BookCard } from "@/components/library/book-card";
 import { UploadDialog } from "@/components/library/upload-dialog";
 import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
 
 const SHELVES = [
   { id: "all", label: "All" },
@@ -179,31 +180,29 @@ export default function LibraryPage() {
           placeholder="Search title or author"
           className="comic-border h-11 w-full max-w-xs rounded-xl bg-panel px-4 font-medium shadow-comic-sm outline-none placeholder:text-faint focus:border-boom"
         />
-        <select
+        <Select
+          ariaLabel="Sort books"
+          className="w-44"
           value={sort}
-          onChange={(event) => {
-            setSort(event.target.value as SortId);
+          options={SORTS.map((entry) => ({ value: entry.id, label: entry.label }))}
+          onChange={(next) => {
+            setSort(next as SortId);
             setArranging(false);
             setLocalOrder(null);
           }}
-          className="comic-border h-11 rounded-xl bg-panel px-3 font-bold shadow-comic-sm outline-none"
-        >
-          {SORTS.map((entry) => (
-            <option key={entry.id} value={entry.id}>
-              {entry.label}
-            </option>
-          ))}
-        </select>
-        <select
+        />
+        <Select
+          ariaLabel="Filter by priority"
+          className="w-40"
           value={priority}
-          onChange={(event) => setPriority(event.target.value as BookPriority | "all")}
-          className="comic-border h-11 rounded-xl bg-panel px-3 font-bold shadow-comic-sm outline-none"
-        >
-          <option value="all">Any priority</option>
-          <option value="high">High</option>
-          <option value="medium">Medium</option>
-          <option value="low">Low</option>
-        </select>
+          options={[
+            { value: "all", label: "Any priority" },
+            { value: "high", label: "High" },
+            { value: "medium", label: "Medium" },
+            { value: "low", label: "Low" },
+          ]}
+          onChange={(next) => setPriority(next as BookPriority | "all")}
+        />
       </div>
 
       <div ref={gridRef}>

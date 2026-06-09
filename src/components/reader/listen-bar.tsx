@@ -5,6 +5,7 @@ import { useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
 import { useReaderPrefs } from "@/lib/reader-prefs";
 import { useVoices } from "@/lib/queries";
+import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import type { Narration } from "@/components/reader/use-narration";
 
@@ -105,30 +106,27 @@ export function ListenBar({ narration }: { narration: Narration }) {
           </ControlButton>
         </div>
         <div className="flex items-center gap-2">
-          <select
+          <Select
+            ariaLabel="Narration voice"
+            direction="up"
+            className="w-40"
             value={voice}
-            onChange={(event) => setVoice(event.target.value)}
-            aria-label="Narration voice"
-            className="comic-border h-10 rounded-xl bg-panel px-2 text-sm font-bold shadow-comic-sm outline-none"
-          >
-            {(voices ?? [{ id: voice, name: "Voice", gender: "", accent: "" }]).map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.name} {option.accent ? `(${option.accent})` : ""}
-              </option>
-            ))}
-          </select>
-          <select
-            value={rate}
-            onChange={(event) => setRate(Number(event.target.value))}
-            aria-label="Narration speed"
-            className="comic-border h-10 rounded-xl bg-panel px-2 text-sm font-bold shadow-comic-sm outline-none"
-          >
-            {RATES.map((option) => (
-              <option key={option} value={option}>
-                {option}x
-              </option>
-            ))}
-          </select>
+            options={(voices ?? [{ id: voice, name: "Voice", gender: "", accent: "" }]).map(
+              (option) => ({
+                value: option.id,
+                label: option.accent ? `${option.name} (${option.accent})` : option.name,
+              }),
+            )}
+            onChange={setVoice}
+          />
+          <Select
+            ariaLabel="Narration speed"
+            direction="up"
+            className="w-24"
+            value={String(rate)}
+            options={RATES.map((option) => ({ value: String(option), label: `${option}x` }))}
+            onChange={(next) => setRate(Number(next))}
+          />
         </div>
       </div>
     </div>
