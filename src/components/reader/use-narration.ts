@@ -163,6 +163,14 @@ export function useNarration({
   }, [rate]);
 
   useEffect(() => {
+    if (!enabled || content === undefined || wantsPlaybackRef.current) return;
+    const target = content.chunks[Math.min(chunkIndexRef.current, content.chunks.length - 1)];
+    if (target) {
+      fetch(narrationApi.audioUrl(bookId, target.id, voiceRef.current)).catch(() => {});
+    }
+  }, [enabled, content, bookId, voice]);
+
+  useEffect(() => {
     if (!enabled) {
       wantsPlaybackRef.current = false;
       halt();

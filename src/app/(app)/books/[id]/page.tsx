@@ -22,7 +22,6 @@ import { EditBookDialog } from "@/components/book/edit-dialog";
 import { ProgressMap } from "@/components/book/progress-map";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { Spinner } from "@/components/ui/spinner";
 import { toast } from "@/components/ui/toast";
 
 const STATUSES: Array<{ id: BookStatus; label: string; active: string }> = [
@@ -62,8 +61,21 @@ export default function BookPage({ params }: { params: Promise<{ id: string }> }
 
   if (isPending) {
     return (
-      <div className="grid place-items-center py-24">
-        <Spinner className="text-ink" />
+      <div className="space-y-6">
+        <div className="comic-border h-9 w-24 animate-pulse rounded-xl bg-soft" />
+        <div className="grid gap-6 md:grid-cols-[270px_1fr]">
+          <div className="space-y-3">
+            <div className="comic-border animate-pulse rounded-card bg-soft" style={{ aspectRatio: "2 / 3" }} />
+            <div className="comic-border h-[52px] animate-pulse rounded-2xl bg-soft" />
+            <div className="comic-border h-[52px] animate-pulse rounded-2xl bg-soft" />
+          </div>
+          <div className="space-y-4">
+            <div className="comic-border h-10 w-2/3 animate-pulse rounded-xl bg-soft" />
+            <div className="comic-border h-6 w-1/3 animate-pulse rounded-xl bg-soft" />
+            <div className="comic-border h-32 animate-pulse rounded-card bg-soft" />
+            <div className="comic-border h-48 animate-pulse rounded-card bg-soft" />
+          </div>
+        </div>
       </div>
     );
   }
