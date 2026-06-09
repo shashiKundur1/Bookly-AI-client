@@ -37,3 +37,19 @@ src/
 The comic design system lives in `src/app/globals.css` as Tailwind 4 theme tokens (`paper`, `ink`, `zap`, `pow`, `boom`…) plus utilities like `comic-border`, `comic-press`, `shine`, and `halftone`. Animations are GSAP only, with `prefers-reduced-motion` respected throughout.
 
 `postinstall` copies the pdf.js worker, cmaps, and standard fonts into `public/` so the reader works offline with Turbopack.
+
+## Production
+
+The `Dockerfile` builds a standalone production image. The API origin is baked in at build time via the `API_URL` build arg (default `http://api:8000`, which matches the compose network). The easiest full-stack deployment is the production compose file in the API repo:
+
+```bash
+cd ../Bookly-AI-api
+JWT_SECRET=$(openssl rand -hex 32) docker compose -f docker-compose.prod.yml up -d --build
+```
+
+To run just the web image against a remote API:
+
+```bash
+docker build --build-arg API_URL=https://your-api.example.com -t bookly-web .
+docker run -p 3000:3000 bookly-web
+```
