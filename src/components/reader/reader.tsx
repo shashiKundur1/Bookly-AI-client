@@ -96,7 +96,6 @@ export function Reader({ bookId, startListening }: { bookId: string; startListen
 
   const narration = useNarration({
     bookId,
-    pageCount: total,
     page: page ?? 1,
     setPage,
     voice: prefs.voice,

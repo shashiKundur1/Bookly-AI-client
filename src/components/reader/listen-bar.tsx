@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 
 import { cn } from "@/lib/cn";
 import { useReaderPrefs } from "@/lib/reader-prefs";
 import { useVoices } from "@/lib/queries";
 import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import type { Narration } from "@/components/reader/use-narration";
+import type { Narration, NarrationSentence } from "@/components/reader/use-narration";
 
 const RATES = [0.8, 1, 1.25, 1.5, 2];
 
@@ -36,40 +36,83 @@ function ControlButton({
   );
 }
 
+function SentenceSpan({
+  sentence,
+  active,
+  done,
+  wordIndex,
+}: {
+  sentence: NarrationSentence;
+  active: boolean;
+  done: boolean;
+  wordIndex: number;
+}) {
+  if (active && sentence.words.length > 0) {
+    return (
+      <span data-active="true">
+        {sentence.words.map((word, index) => (
+          <span
+            key={`${index}-${word.start}`}
+            className={cn(
+              "rounded px-0.5 transition-colors duration-75",
+              index === wordIndex && "bg-zap font-bold",
+              index < wordIndex && "text-muted",
+            )}
+          >
+            {word.word}{" "}
+          </span>
+        ))}
+      </span>
+    );
+  }
+  return (
+    <span
+      data-active={active ? "true" : undefined}
+      className={cn(
+        "rounded px-0.5 transition-colors duration-150",
+        active && "bg-zap/70 font-bold",
+        done && "text-muted",
+      )}
+    >
+      {sentence.text}{" "}
+    </span>
+  );
+}
+
 export function ListenBar({ narration }: { narration: Narration }) {
   const { voice, rate, setVoice, setRate } = useReaderPrefs();
   const { data: voices } = useVoices();
-  const wordContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const container = wordContainerRef.current;
-    const active = container?.querySelector("[data-active='true']");
+    if (voices && voices.length > 0 && !voices.some((option) => option.id === voice)) {
+      setVoice(voices[0].id);
+    }
+  }, [voices, voice, setVoice]);
+
+  useEffect(() => {
+    const active = document.querySelector("[data-narration-words] [data-active='true']");
     active?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [narration.wordIndex]);
+  }, [narration.activeSentence, narration.wordIndex]);
 
   return (
     <div className="comic-border mx-auto w-full max-w-3xl rounded-card bg-panel p-3 shadow-comic-lg">
       <div
-        ref={wordContainerRef}
+        data-narration-words
         className="no-scrollbar mb-3 max-h-16 overflow-y-auto overscroll-contain rounded-xl bg-soft px-3 py-2 text-sm font-medium leading-relaxed"
       >
-        {narration.loading ? (
+        {narration.loading && narration.sentences.length === 0 ? (
           <span className="inline-flex items-center gap-2 font-bold text-muted">
             <Spinner className="text-muted" /> Preparing narration…
           </span>
-        ) : narration.words.length > 0 ? (
-          narration.words.map((word, index) => (
-            <span
-              key={`${index}-${word.start}`}
-              data-active={index === narration.wordIndex}
-              className={cn(
-                "rounded px-0.5 transition-colors duration-75",
-                index === narration.wordIndex && "bg-zap font-bold",
-                index < narration.wordIndex && "text-muted",
-              )}
-            >
-              {word.word}{" "}
-            </span>
+        ) : narration.sentences.length > 0 ? (
+          narration.sentences.map((sentence, index) => (
+            <SentenceSpan
+              key={`${index}-${sentence.offset}`}
+              sentence={sentence}
+              active={index === narration.activeSentence}
+              done={index < narration.activeSentence}
+              wordIndex={index === narration.activeSentence ? narration.wordIndex : -1}
+            />
           ))
         ) : (
           <span className="font-bold text-muted">Press play to start listening</span>
@@ -109,7 +152,7 @@ export function ListenBar({ narration }: { narration: Narration }) {
           <Select
             ariaLabel="Narration voice"
             direction="up"
-            className="w-40"
+            className="w-44"
             value={voice}
             options={(voices ?? [{ id: voice, name: "Voice", gender: "", accent: "" }]).map(
               (option) => ({

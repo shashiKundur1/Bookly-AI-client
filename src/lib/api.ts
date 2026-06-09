@@ -215,6 +215,13 @@ export const readingApi = {
     }),
 };
 
+export function narrationSocketUrl(bookId: string): string {
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const host =
+    window.location.port === "3000" ? `${window.location.hostname}:8000` : window.location.host;
+  return `${protocol}://${host}${BASE}/books/${bookId}/narrate`;
+}
+
 export const narrationApi = {
   voices: () => api<Voice[]>("/voices"),
   content: (bookId: string) => api<ContentOverview>(`/books/${bookId}/content`),

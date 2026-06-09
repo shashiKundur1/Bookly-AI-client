@@ -2,14 +2,25 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { narrationApi } from "@/lib/api";
-import { usePageContent } from "@/lib/queries";
+import { narrationSocketUrl } from "@/lib/api";
 import { toast } from "@/components/ui/toast";
-import type { Chunk, WordTiming } from "@/lib/types";
+import type { WordTiming } from "@/lib/types";
+
+export interface NarrationChunk {
+  id: string;
+  page: number;
+  blocks: number[];
+  speech: string;
+}
+
+export interface NarrationSentence {
+  text: string;
+  offset: number;
+  words: WordTiming[];
+}
 
 interface NarrationOptions {
   bookId: string;
-  pageCount: number;
   page: number;
   setPage: (page: number) => void;
   voice: string;
@@ -17,230 +28,309 @@ interface NarrationOptions {
   enabled: boolean;
 }
 
-export function useNarration({
-  bookId,
-  pageCount,
-  page,
-  setPage,
-  voice,
-  rate,
-  enabled,
-}: NarrationOptions) {
-  const [chunkIndex, setChunkIndex] = useState(0);
+interface ServerMessage {
+  type: string;
+  id?: string;
+  page?: number;
+  blocks?: number[];
+  speech?: string;
+  sample_rate?: number;
+  text?: string;
+  offset?: number;
+  words?: WordTiming[];
+  message?: string;
+}
+
+const MAX_BUFFER_AHEAD_SECONDS = 25;
+
+export function useNarration({ bookId, page, setPage, voice, rate, enabled }: NarrationOptions) {
   const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [words, setWords] = useState<WordTiming[]>([]);
+  const [currentChunk, setCurrentChunk] = useState<NarrationChunk | null>(null);
+  const [sentences, setSentences] = useState<NarrationSentence[]>([]);
+  const [activeSentence, setActiveSentence] = useState(-1);
   const [wordIndex, setWordIndex] = useState(-1);
 
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const tokenRef = useRef(0);
-  const wantsPlaybackRef = useRef(false);
-  const chunksRef = useRef<Chunk[]>([]);
-  const chunkIndexRef = useRef(0);
+  const socketRef = useRef<WebSocket | null>(null);
+  const ctxRef = useRef<AudioContext | null>(null);
+  const sourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const nextTimeRef = useRef(0);
+  const chunkStartRef = useRef(0);
+  const chunkStartPendingRef = useRef(false);
+  const sampleRateRef = useRef(24000);
+  const pendingAckRef = useRef<string | null>(null);
+  const endedRef = useRef(false);
+  const wantsPlayRef = useRef(false);
+  const closingRef = useRef(false);
   const pageRef = useRef(page);
-  const pageCountRef = useRef(pageCount);
-  const wordsRef = useRef<WordTiming[]>([]);
-  const rateRef = useRef(rate);
   const voiceRef = useRef(voice);
+  const rateRef = useRef(rate);
   const setPageRef = useRef(setPage);
+  const currentChunkRef = useRef<NarrationChunk | null>(null);
+  const sentencesRef = useRef<NarrationSentence[]>([]);
 
   pageRef.current = page;
-  pageCountRef.current = pageCount;
-  chunkIndexRef.current = chunkIndex;
-  rateRef.current = rate;
-  voiceRef.current = voice;
   setPageRef.current = setPage;
 
-  const { data: content } = usePageContent(bookId, page, enabled);
-  const chunks = content?.chunks ?? [];
-  chunksRef.current = chunks;
-  const currentChunk: Chunk | null = chunks[chunkIndex] ?? null;
-
-  const getAudio = useCallback(() => {
-    if (audioRef.current === null) {
-      const element = new Audio();
-      element.preload = "auto";
-      element.addEventListener("ended", () => {
-        if (!wantsPlaybackRef.current) return;
-        if (chunkIndexRef.current + 1 < chunksRef.current.length) {
-          setChunkIndex(chunkIndexRef.current + 1);
-        } else if (pageRef.current < pageCountRef.current) {
-          setChunkIndex(0);
-          setPageRef.current(pageRef.current + 1);
-        } else {
-          wantsPlaybackRef.current = false;
-          setPlaying(false);
-        }
-      });
-      element.addEventListener("timeupdate", () => {
-        const time = element.currentTime;
-        const timings = wordsRef.current;
-        let index = -1;
-        for (let i = 0; i < timings.length; i++) {
-          if (time >= timings[i].start) index = i;
-          else break;
-        }
-        setWordIndex(index);
-      });
-      audioRef.current = element;
-    }
-    return audioRef.current;
-  }, []);
-
-  const halt = useCallback(() => {
-    tokenRef.current++;
-    const element = audioRef.current;
-    if (element) {
-      element.pause();
-      element.removeAttribute("src");
-    }
-    setPlaying(false);
-    setLoading(false);
+  const flushAudio = useCallback(() => {
+    sourcesRef.current.forEach((source) => {
+      try {
+        source.stop();
+      } catch {
+        return;
+      }
+    });
+    sourcesRef.current = [];
+    const ctx = ctxRef.current;
+    nextTimeRef.current = ctx ? ctx.currentTime : 0;
+    chunkStartPendingRef.current = true;
+    pendingAckRef.current = null;
+    endedRef.current = false;
+    sentencesRef.current = [];
+    setSentences([]);
+    setActiveSentence(-1);
     setWordIndex(-1);
   }, []);
 
-  const playChunk = useCallback(
-    async (target: Chunk) => {
-      const token = ++tokenRef.current;
-      setLoading(true);
-      setWordIndex(-1);
+  const teardown = useCallback(() => {
+    closingRef.current = true;
+    wantsPlayRef.current = false;
+    const socket = socketRef.current;
+    socketRef.current = null;
+    if (socket && socket.readyState <= WebSocket.OPEN) {
       try {
-        const timing = await narrationApi.timing(bookId, target.id, voiceRef.current);
-        if (token !== tokenRef.current) return;
-        wordsRef.current = timing.words;
-        setWords(timing.words);
-        const element = getAudio();
-        element.src = narrationApi.audioUrl(bookId, target.id, voiceRef.current);
-        element.playbackRate = rateRef.current;
-        await element.play();
-        if (token !== tokenRef.current) {
-          element.pause();
-          return;
+        socket.send(JSON.stringify({ type: "stop" }));
+      } catch {
+        socketRef.current = null;
+      }
+      socket.close();
+    }
+    flushAudio();
+    const ctx = ctxRef.current;
+    ctxRef.current = null;
+    if (ctx && ctx.state !== "closed") {
+      ctx.close().catch(() => {});
+    }
+    setPlaying(false);
+    setLoading(false);
+    setCurrentChunk(null);
+    currentChunkRef.current = null;
+    closingRef.current = false;
+  }, [flushAudio]);
+
+  const schedulePcm = useCallback((buffer: ArrayBuffer) => {
+    const ctx = ctxRef.current;
+    if (!ctx || buffer.byteLength < 2) return;
+    const ints = new Int16Array(buffer);
+    const floats = new Float32Array(ints.length);
+    for (let index = 0; index < ints.length; index++) {
+      floats[index] = ints[index] / 32768;
+    }
+    const audioBuffer = ctx.createBuffer(1, floats.length, sampleRateRef.current);
+    audioBuffer.copyToChannel(floats, 0);
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+    const startAt = Math.max(nextTimeRef.current, ctx.currentTime + 0.05);
+    if (chunkStartPendingRef.current) {
+      chunkStartRef.current = startAt;
+      chunkStartPendingRef.current = false;
+    }
+    source.start(startAt);
+    nextTimeRef.current = startAt + audioBuffer.duration;
+    sourcesRef.current.push(source);
+    if (sourcesRef.current.length > 64) {
+      sourcesRef.current.splice(0, sourcesRef.current.length - 64);
+    }
+    setLoading(false);
+  }, []);
+
+  const handleMessage = useCallback(
+    (event: MessageEvent) => {
+      if (event.data instanceof ArrayBuffer) {
+        schedulePcm(event.data);
+        return;
+      }
+      let message: ServerMessage;
+      try {
+        message = JSON.parse(event.data as string) as ServerMessage;
+      } catch {
+        return;
+      }
+      if (message.type === "chunk" && message.id && message.page) {
+        const chunk: NarrationChunk = {
+          id: message.id,
+          page: message.page,
+          blocks: message.blocks ?? [],
+          speech: message.speech ?? "",
+        };
+        currentChunkRef.current = chunk;
+        setCurrentChunk(chunk);
+        sampleRateRef.current = message.sample_rate || 24000;
+        chunkStartPendingRef.current = true;
+        sentencesRef.current = [];
+        setSentences([]);
+        setActiveSentence(-1);
+        setWordIndex(-1);
+        if (message.page !== pageRef.current) {
+          setPageRef.current(message.page);
         }
-        setLoading(false);
-        setPlaying(true);
-        const next = chunksRef.current[chunkIndexRef.current + 1];
-        if (next) {
-          fetch(narrationApi.audioUrl(bookId, next.id, voiceRef.current)).catch(() => {});
-        }
-      } catch (error) {
-        if (token !== tokenRef.current) return;
-        setLoading(false);
-        setPlaying(false);
-        wantsPlaybackRef.current = false;
-        if (error instanceof DOMException && error.name === "NotAllowedError") {
-          toast("Tap the play button to start listening", "success");
-        } else {
-          toast(error instanceof Error ? error.message : "Narration failed");
-        }
+      } else if (message.type === "sentence") {
+        sentencesRef.current = [
+          ...sentencesRef.current,
+          { text: message.text ?? "", offset: message.offset ?? 0, words: message.words ?? [] },
+        ];
+        setSentences(sentencesRef.current);
+      } else if (message.type === "chunk_end" && message.id) {
+        pendingAckRef.current = message.id;
+      } else if (message.type === "end") {
+        endedRef.current = true;
+      } else if (message.type === "error") {
+        toast(message.message ?? "Narration error");
       }
     },
-    [bookId, getAudio],
+    [schedulePcm],
   );
 
-  useEffect(() => {
-    if (!enabled || !wantsPlaybackRef.current || content === undefined) return;
-    const available = content.chunks;
-    if (available.length === 0) {
-      if (pageRef.current < pageCountRef.current) {
-        setChunkIndex(0);
-        setPageRef.current(pageRef.current + 1);
-      } else {
-        wantsPlaybackRef.current = false;
+  const connect = useCallback(() => {
+    const existing = socketRef.current;
+    if (existing && existing.readyState <= WebSocket.OPEN) return;
+    const socket = new WebSocket(narrationSocketUrl(bookId));
+    socket.binaryType = "arraybuffer";
+    socketRef.current = socket;
+    setLoading(true);
+    socket.onopen = () => {
+      socket.send(
+        JSON.stringify({
+          type: "start",
+          chunk: currentChunkRef.current?.id,
+          page: currentChunkRef.current ? undefined : pageRef.current,
+          voice: voiceRef.current,
+          speed: rateRef.current,
+        }),
+      );
+    };
+    socket.onmessage = handleMessage;
+    socket.onclose = () => {
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+      if (!closingRef.current && wantsPlayRef.current) {
+        wantsPlayRef.current = false;
         setPlaying(false);
         setLoading(false);
+        toast("Narration disconnected — press play to resume");
       }
-      return;
-    }
-    const target = available[Math.min(chunkIndex, available.length - 1)];
-    playChunk(target);
-  }, [enabled, content, chunkIndex, voice, playChunk]);
-
-  useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.playbackRate = rate;
-    }
-  }, [rate]);
-
-  useEffect(() => {
-    if (!enabled || content === undefined || wantsPlaybackRef.current) return;
-    const target = content.chunks[Math.min(chunkIndexRef.current, content.chunks.length - 1)];
-    if (target) {
-      fetch(narrationApi.audioUrl(bookId, target.id, voiceRef.current)).catch(() => {});
-    }
-  }, [enabled, content, bookId, voice]);
-
-  useEffect(() => {
-    if (!enabled) {
-      wantsPlaybackRef.current = false;
-      halt();
-    }
-  }, [enabled, halt]);
-
-  useEffect(() => {
-    return () => {
-      wantsPlaybackRef.current = false;
-      halt();
     };
-  }, [halt]);
+  }, [bookId, handleMessage]);
 
   const play = useCallback(() => {
-    wantsPlaybackRef.current = true;
-    const element = audioRef.current;
-    if (element && element.src && element.paused && !element.ended && words.length > 0) {
-      element.play().then(() => setPlaying(true)).catch(() => {});
-      return;
+    wantsPlayRef.current = true;
+    let ctx = ctxRef.current;
+    if (!ctx || ctx.state === "closed") {
+      ctx = new AudioContext();
+      ctxRef.current = ctx;
+      nextTimeRef.current = ctx.currentTime;
     }
-    const target = chunksRef.current[chunkIndexRef.current];
-    if (target) {
-      playChunk(target);
-    } else {
-      setChunkIndex(0);
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => {});
     }
-  }, [playChunk, words.length]);
+    connect();
+    setPlaying(true);
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setLoading(true);
+    }
+  }, [connect]);
 
   const pause = useCallback(() => {
-    wantsPlaybackRef.current = false;
-    audioRef.current?.pause();
+    wantsPlayRef.current = false;
     setPlaying(false);
+    ctxRef.current?.suspend().catch(() => {});
   }, []);
 
   const skip = useCallback(
-    (offset: number) => {
-      const nextIndex = chunkIndexRef.current + offset;
-      if (nextIndex >= 0 && nextIndex < chunksRef.current.length) {
-        wantsPlaybackRef.current = true;
-        setChunkIndex(nextIndex);
-      } else if (nextIndex < 0 && pageRef.current > 1) {
-        wantsPlaybackRef.current = true;
-        setChunkIndex(0);
-        setPageRef.current(pageRef.current - 1);
-      } else if (nextIndex >= chunksRef.current.length && pageRef.current < pageCountRef.current) {
-        wantsPlaybackRef.current = true;
-        setChunkIndex(0);
-        setPageRef.current(pageRef.current + 1);
-      }
+    (direction: number) => {
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      flushAudio();
+      setLoading(true);
+      socket.send(JSON.stringify({ type: "seek", direction }));
     },
-    [],
+    [flushAudio],
   );
 
-  const restartFromPageStart = useCallback(() => {
-    setChunkIndex(0);
-  }, []);
+  useEffect(() => {
+    if (!enabled) return;
+    const ticker = setInterval(() => {
+      const ctx = ctxRef.current;
+      const socket = socketRef.current;
+      if (!ctx) return;
+      const ahead = nextTimeRef.current - ctx.currentTime;
+      if (
+        pendingAckRef.current !== null &&
+        socket !== null &&
+        socket.readyState === WebSocket.OPEN &&
+        wantsPlayRef.current &&
+        ahead < MAX_BUFFER_AHEAD_SECONDS
+      ) {
+        socket.send(JSON.stringify({ type: "ack", id: pendingAckRef.current }));
+        pendingAckRef.current = null;
+      }
+      if (endedRef.current && ahead <= 0.05 && wantsPlayRef.current) {
+        wantsPlayRef.current = false;
+        setPlaying(false);
+      }
+      if (chunkStartPendingRef.current) return;
+      const elapsed = ctx.currentTime - chunkStartRef.current;
+      if (elapsed < 0) return;
+      const list = sentencesRef.current;
+      let active = -1;
+      for (let index = 0; index < list.length; index++) {
+        if (list[index].offset <= elapsed) active = index;
+        else break;
+      }
+      setActiveSentence(active);
+      if (active >= 0) {
+        const words = list[active].words;
+        let current = -1;
+        for (let index = 0; index < words.length; index++) {
+          if (words[index].start <= elapsed) current = index;
+          else break;
+        }
+        setWordIndex(current);
+      } else {
+        setWordIndex(-1);
+      }
+    }, 150);
+    return () => clearInterval(ticker);
+  }, [enabled]);
 
-  return {
-    playing,
-    loading,
-    words,
-    wordIndex,
-    currentChunk,
-    chunkIndex,
-    chunkCount: chunks.length,
-    play,
-    pause,
-    skip,
-    restartFromPageStart,
-  };
+  useEffect(() => {
+    const voiceChanged = voiceRef.current !== voice;
+    const rateChanged = rateRef.current !== rate;
+    voiceRef.current = voice;
+    rateRef.current = rate;
+    const socket = socketRef.current;
+    if (!enabled || (!voiceChanged && !rateChanged)) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: "voice", voice }));
+    socket.send(JSON.stringify({ type: "speed", speed: rate }));
+    const chunk = currentChunkRef.current;
+    if (chunk) {
+      flushAudio();
+      setLoading(true);
+      socket.send(JSON.stringify({ type: "seek", chunk: chunk.id }));
+    }
+  }, [voice, rate, enabled, flushAudio]);
+
+  useEffect(() => {
+    if (!enabled) teardown();
+  }, [enabled, teardown]);
+
+  useEffect(() => teardown, [teardown]);
+
+  return { playing, loading, currentChunk, sentences, activeSentence, wordIndex, play, pause, skip };
 }
 
 export type Narration = ReturnType<typeof useNarration>;
