@@ -13,6 +13,7 @@ import { useBook, useContentOverview, usePageContent, useUpdateProgress } from "
 import { useReaderPrefs } from "@/lib/reader-prefs";
 import { FullScreenSpinner, Spinner } from "@/components/ui/spinner";
 import { ListenBar } from "@/components/reader/listen-bar";
+import { NarrationSubtitles } from "@/components/reader/subtitles";
 import { useNarration } from "@/components/reader/use-narration";
 
 pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
@@ -100,6 +101,7 @@ export function Reader({ bookId, startListening }: { bookId: string; startListen
     setPage,
     voice: prefs.voice,
     rate: prefs.rate,
+    emotion: prefs.emotion,
     enabled: listening,
   });
   const narrationRef = useRef(narration);
@@ -227,6 +229,27 @@ export function Reader({ bookId, startListening }: { bookId: string; startListen
     return pageContent.blocks.filter((block) => blockIds.has(block.i)).map((block) => block.bbox);
   }, [listening, narration.currentChunk, pageContent, page]);
 
+  const seekToRef = useRef(narration.seekTo);
+  seekToRef.current = narration.seekTo;
+
+  // Manual page flips while narration plays re-anchor it to the visible page
+  // instead of letting the old chunk drag the reader back.
+  const heardPage = narration.currentChunk?.page;
+  const followPage = listening && (narration.playing || narration.loading);
+  useEffect(() => {
+    if (!followPage || page === null || heardPage == null || heardPage === page) return;
+    const handle = setTimeout(() => seekToRef.current({ page }), 500);
+    return () => clearTimeout(handle);
+  }, [followPage, heardPage, page]);
+
+  const startFromBlock = useCallback(
+    (blockIndex: number) => {
+      const chunk = pageContent?.chunks.find((candidate) => candidate.blocks.includes(blockIndex));
+      if (chunk) seekToRef.current({ chunk: chunk.id });
+    },
+    [pageContent],
+  );
+
   if (isPending || page === null) {
     return <FullScreenSpinner />;
   }
@@ -338,6 +361,27 @@ export function Reader({ bookId, startListening }: { bookId: string; startListen
                     }}
                   />
                 ))}
+                {listening
+                  ? pageContent?.blocks.map((block) => (
+                      <button
+                        key={`tap-${block.i}`}
+                        aria-label="Start narration here"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          startFromBlock(block.i);
+                        }}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onPointerUp={(event) => event.stopPropagation()}
+                        className="pointer-events-auto absolute cursor-pointer rounded-md hover:bg-boom/15"
+                        style={{
+                          left: `${block.bbox[0] * 100}%`,
+                          top: `${block.bbox[1] * 100}%`,
+                          width: `${(block.bbox[2] - block.bbox[0]) * 100}%`,
+                          height: `${(block.bbox[3] - block.bbox[1]) * 100}%`,
+                        }}
+                      />
+                    ))
+                  : null}
               </div>
             </div>
             <div className="hidden">
@@ -427,7 +471,7 @@ export function Reader({ bookId, startListening }: { bookId: string; startListen
           </div>
         ) : null}
 
-        <div className="absolute bottom-32 right-3 z-20 flex flex-col gap-2">
+        <div className="absolute right-2 top-1/2 z-20 flex -translate-y-1/2 flex-col gap-2 sm:right-3">
           <button
             aria-label="Zoom in"
             onClick={() => setZoom((value) => Math.min(3, value + 0.25))}
@@ -450,6 +494,8 @@ export function Reader({ bookId, startListening }: { bookId: string; startListen
             −
           </button>
         </div>
+
+        {listening ? <NarrationSubtitles narration={narration} raised={chrome} /> : null}
 
         <div
           className={cn(

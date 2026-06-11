@@ -13,10 +13,16 @@ export interface NarrationChunk {
   speech: string;
 }
 
+export interface NarrationCues {
+  lead: string;
+  trail: string;
+}
+
 export interface NarrationSentence {
   text: string;
   offset: number;
   words: WordTiming[];
+  cues: NarrationCues;
 }
 
 interface AudioSegment {
@@ -38,6 +44,7 @@ interface NarrationOptions {
   setPage: (page: number) => void;
   voice: string;
   rate: number;
+  emotion: string;
   enabled: boolean;
 }
 
@@ -52,18 +59,28 @@ interface ServerMessage {
   text?: string;
   offset?: number;
   words?: WordTiming[];
+  cues?: NarrationCues;
   message?: string;
 }
 
 const MAX_BUFFER_AHEAD_SECONDS = 25;
 
-export function useNarration({ bookId, page, setPage, voice, rate, enabled }: NarrationOptions) {
+export function useNarration({
+  bookId,
+  page,
+  setPage,
+  voice,
+  rate,
+  emotion,
+  enabled,
+}: NarrationOptions) {
   const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(false);
   const [currentChunk, setCurrentChunk] = useState<NarrationChunk | null>(null);
   const [sentences, setSentences] = useState<NarrationSentence[]>([]);
   const [activeSentence, setActiveSentence] = useState(-1);
   const [wordIndex, setWordIndex] = useState(-1);
+  const [cuePhase, setCuePhase] = useState<"lead" | "break" | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
@@ -72,12 +89,14 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
   const nextTimeRef = useRef(0);
   const sampleRateRef = useRef(24000);
   const pendingAckRef = useRef<string | null>(null);
+  const pendingSeekRef = useRef<{ chunk?: string; page?: number } | null>(null);
   const endedRef = useRef(false);
   const wantsPlayRef = useRef(false);
   const closingRef = useRef(false);
   const pageRef = useRef(page);
   const voiceRef = useRef(voice);
   const rateRef = useRef(rate);
+  const emotionRef = useRef(emotion);
   const setPageRef = useRef(setPage);
   const heardChunkRef = useRef<NarrationChunk | null>(null);
   const sentenceCountRef = useRef(-1);
@@ -103,6 +122,7 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
     setSentences([]);
     setActiveSentence(-1);
     setWordIndex(-1);
+    setCuePhase(null);
   }, []);
 
   const teardown = useCallback(() => {
@@ -194,7 +214,22 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
               text: message.text ?? "",
               offset: message.offset ?? 0,
               words: message.words ?? [],
+              cues: message.cues ?? { lead: "", trail: "" },
             });
+            break;
+          }
+        }
+      } else if (message.type === "sentence_update" && message.chunk_id) {
+        for (let index = queueRef.current.length - 1; index >= 0; index--) {
+          const entry = queueRef.current[index];
+          if (entry.chunk.id === message.chunk_id) {
+            const sentence = entry.sentences.find(
+              (candidate) => Math.abs(candidate.offset - (message.offset ?? 0)) < 0.01,
+            );
+            if (sentence) {
+              sentence.words = message.words ?? sentence.words;
+              sentenceCountRef.current = -1; // force the ticker to re-sync state
+            }
             break;
           }
         }
@@ -217,13 +252,20 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
     socketRef.current = socket;
     setLoading(true);
     socket.onopen = () => {
+      const pending = pendingSeekRef.current;
+      pendingSeekRef.current = null;
+      const anchor = heardChunkRef.current;
+      // Resume from the heard chunk only when the listener is still on its
+      // page; after a manual page flip, narration restarts from the visible page.
+      const useAnchor = !pending && anchor !== null && anchor.page === pageRef.current;
       socket.send(
         JSON.stringify({
           type: "start",
-          chunk: heardChunkRef.current?.id,
-          page: heardChunkRef.current ? undefined : pageRef.current,
+          chunk: pending?.chunk ?? (useAnchor ? anchor.id : undefined),
+          page: pending?.page ?? (useAnchor ? undefined : pageRef.current),
           voice: voiceRef.current,
           speed: rateRef.current,
+          emotion: emotionRef.current,
         }),
       );
     };
@@ -257,8 +299,18 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       setLoading(true);
+      return;
     }
-  }, [connect]);
+    // Resuming after the listener flipped to another page: restart there
+    // instead of dragging them back to the previously heard chunk.
+    const anchor = heardChunkRef.current;
+    if (anchor && anchor.page !== pageRef.current) {
+      flushAudio();
+      heardChunkRef.current = null;
+      setLoading(true);
+      socket.send(JSON.stringify({ type: "seek", page: pageRef.current }));
+    }
+  }, [connect, flushAudio]);
 
   const pause = useCallback(() => {
     wantsPlayRef.current = false;
@@ -276,6 +328,22 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
       socket.send(JSON.stringify({ type: "seek", chunk: anchor, direction }));
     },
     [flushAudio],
+  );
+
+  const seekTo = useCallback(
+    (target: { chunk?: string; page?: number }) => {
+      pendingSeekRef.current = target;
+      play();
+      const socket = socketRef.current;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        pendingSeekRef.current = null;
+        flushAudio();
+        heardChunkRef.current = null;
+        setLoading(true);
+        socket.send(JSON.stringify({ type: "seek", ...target }));
+      }
+    },
+    [play, flushAudio],
   );
 
   useEffect(() => {
@@ -299,6 +367,7 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
       if (endedRef.current && ahead <= 0.05 && wantsPlayRef.current) {
         wantsPlayRef.current = false;
         setPlaying(false);
+        ctx.suspend().catch(() => {});
       }
 
       const queue = queueRef.current;
@@ -349,15 +418,30 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
       }
       setActiveSentence(activeIdx);
       if (activeIdx >= 0) {
-        const words = list[activeIdx].words;
+        const sentence = list[activeIdx];
+        const words = sentence.words;
         let current = -1;
         for (let index = 0; index < words.length; index++) {
           if (words[index].start <= elapsed) current = index;
           else break;
         }
         setWordIndex(current);
+        // Acting phases: the lead cue plays before the first word; the trail
+        // cue is the narrator's breath after the last word — a real break.
+        if (sentence.cues.lead && words.length > 0 && elapsed < words[0].start - 0.05) {
+          setCuePhase("lead");
+        } else if (
+          sentence.cues.trail &&
+          words.length > 0 &&
+          elapsed > words[words.length - 1].end + 0.05
+        ) {
+          setCuePhase("break");
+        } else {
+          setCuePhase(null);
+        }
       } else {
         setWordIndex(-1);
+        setCuePhase(null);
       }
     }, 100);
     return () => clearInterval(ticker);
@@ -366,20 +450,23 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
   useEffect(() => {
     const voiceChanged = voiceRef.current !== voice;
     const rateChanged = rateRef.current !== rate;
+    const emotionChanged = emotionRef.current !== emotion;
     voiceRef.current = voice;
     rateRef.current = rate;
+    emotionRef.current = emotion;
     const socket = socketRef.current;
-    if (!enabled || (!voiceChanged && !rateChanged)) return;
+    if (!enabled || (!voiceChanged && !rateChanged && !emotionChanged)) return;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({ type: "voice", voice }));
     socket.send(JSON.stringify({ type: "speed", speed: rate }));
+    socket.send(JSON.stringify({ type: "emotion", emotion }));
     const anchor = heardChunkRef.current;
     if (anchor) {
       flushAudio();
       setLoading(true);
       socket.send(JSON.stringify({ type: "seek", chunk: anchor.id }));
     }
-  }, [voice, rate, enabled, flushAudio]);
+  }, [voice, rate, emotion, enabled, flushAudio]);
 
   useEffect(() => {
     if (!enabled) teardown();
@@ -387,7 +474,19 @@ export function useNarration({ bookId, page, setPage, voice, rate, enabled }: Na
 
   useEffect(() => teardown, [teardown]);
 
-  return { playing, loading, currentChunk, sentences, activeSentence, wordIndex, play, pause, skip };
+  return {
+    playing,
+    loading,
+    currentChunk,
+    sentences,
+    activeSentence,
+    wordIndex,
+    cuePhase,
+    play,
+    pause,
+    skip,
+    seekTo,
+  };
 }
 
 export type Narration = ReturnType<typeof useNarration>;

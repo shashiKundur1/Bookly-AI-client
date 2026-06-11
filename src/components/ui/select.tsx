@@ -75,7 +75,7 @@ export function Select({
         onClick={() => setOpen(!open)}
         className="comic-border comic-press flex h-11 w-full items-center justify-between gap-2 rounded-xl bg-panel px-3 font-bold shadow-comic-sm"
       >
-        <span className="truncate">{selected?.label ?? value}</span>
+        <span className="min-w-0 truncate">{selected?.label ?? value}</span>
         <svg
           viewBox="0 0 24 24"
           className={cn("size-4 shrink-0 transition-transform duration-200", open && "rotate-180")}

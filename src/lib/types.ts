@@ -86,14 +86,16 @@ export interface Voice {
   accent: string;
 }
 
+export interface Emotion {
+  id: string;
+  name: string;
+  tagline: string;
+}
+
 export interface WordTiming {
   word: string;
   start: number;
   end: number;
-}
-
-export interface ChunkTiming {
-  words: WordTiming[];
 }
 
 export interface ReadingSession {

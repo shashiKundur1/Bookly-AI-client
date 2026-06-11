@@ -20,12 +20,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 
-const STATUS_LABELS: Record<string, string> = {
-  to_read: "To read",
-  reading: "Reading",
-  finished: "Finished",
-};
-
 export default function ProfilePage() {
   const router = useRouter();
   const { data: user } = useMe();

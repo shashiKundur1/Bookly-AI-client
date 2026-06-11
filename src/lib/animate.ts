@@ -28,19 +28,6 @@ export function popIn(
   });
 }
 
-export function stamp(target: gsap.TweenTarget, options: { delay?: number } = {}) {
-  if (prefersReducedMotion()) return;
-  gsap.from(target, {
-    opacity: 0,
-    scale: 1.6,
-    rotation: -8,
-    duration: 0.5,
-    ease: "back.out(1.6)",
-    delay: options.delay ?? 0,
-    clearProps: "all",
-  });
-}
-
 export function burst(target: gsap.TweenTarget) {
   if (prefersReducedMotion()) return;
   gsap.fromTo(

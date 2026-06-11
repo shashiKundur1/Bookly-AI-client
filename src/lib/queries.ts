@@ -138,6 +138,14 @@ export function useVoices() {
   });
 }
 
+export function useEmotions() {
+  return useQuery({
+    queryKey: ["emotions"],
+    queryFn: narrationApi.emotions,
+    staleTime: Infinity,
+  });
+}
+
 export function useContentOverview(bookId: string, enabled = true) {
   return useQuery({
     queryKey: ["content", bookId],

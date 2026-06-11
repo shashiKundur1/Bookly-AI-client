@@ -2,8 +2,8 @@ import type {
   AuthResponse,
   Book,
   BookFilters,
-  ChunkTiming,
   ContentOverview,
+  Emotion,
   PageContent,
   Progress,
   ReadingSession,
@@ -217,17 +217,15 @@ export const readingApi = {
 
 export function narrationSocketUrl(bookId: string): string {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const host =
-    window.location.port === "3000" ? `${window.location.hostname}:8000` : window.location.host;
-  return `${protocol}://${host}${BASE}/books/${bookId}/narrate`;
+  const devHost =
+    process.env.NEXT_PUBLIC_WS_HOST ??
+    (window.location.port === "3000" ? `${window.location.hostname}:8000` : null);
+  return `${protocol}://${devHost ?? window.location.host}${BASE}/books/${bookId}/narrate`;
 }
 
 export const narrationApi = {
   voices: () => api<Voice[]>("/voices"),
+  emotions: () => api<Emotion[]>("/emotions"),
   content: (bookId: string) => api<ContentOverview>(`/books/${bookId}/content`),
   page: (bookId: string, page: number) => api<PageContent>(`/books/${bookId}/pages/${page}`),
-  timing: (bookId: string, chunkId: string, voice: string) =>
-    api<ChunkTiming>(`/books/${bookId}/audio/${chunkId}/timing${query({ voice })}`),
-  audioUrl: (bookId: string, chunkId: string, voice: string) =>
-    `${BASE}/books/${bookId}/audio/${chunkId}${query({ voice })}`,
 };
