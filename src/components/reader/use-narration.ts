@@ -244,30 +244,48 @@ export function useNarration({
     [schedulePcm],
   );
 
+  const startPayload = useCallback(() => {
+    const pending = pendingSeekRef.current;
+    pendingSeekRef.current = null;
+    const anchor = heardChunkRef.current;
+    // Resume from the heard chunk only when the listener is still on its
+    // page; after a manual page flip, narration restarts from the visible page.
+    const useAnchor = !pending && anchor !== null && anchor.page === pageRef.current;
+    return {
+      chunk: pending?.chunk ?? (useAnchor ? anchor.id : undefined),
+      page: pending?.page ?? (useAnchor ? undefined : pageRef.current),
+      voice: voiceRef.current,
+      speed: rateRef.current,
+      emotion: emotionRef.current,
+    };
+  }, []);
+
+  const ensureContext = useCallback(() => {
+    let ctx = ctxRef.current;
+    if (!ctx || ctx.state === "closed") {
+      ctx = new AudioContext();
+      ctxRef.current = ctx;
+      nextTimeRef.current = ctx.currentTime;
+    }
+    // Until play is pressed the context must sit suspended: audio frames
+    // schedule silently into its frozen timeline and play() is just resume().
+    // (Browsers with autoplay allowed create contexts already running.)
+    if (!wantsPlayRef.current && ctx.state === "running") {
+      ctx.suspend().catch(() => {});
+    }
+    return ctx;
+  }, []);
+
   const connect = useCallback(() => {
     const existing = socketRef.current;
     if (existing && existing.readyState <= WebSocket.OPEN) return;
+    ensureContext();
     const socket = new WebSocket(narrationSocketUrl(bookId));
     socket.binaryType = "arraybuffer";
     socketRef.current = socket;
-    setLoading(true);
     socket.onopen = () => {
-      const pending = pendingSeekRef.current;
-      pendingSeekRef.current = null;
-      const anchor = heardChunkRef.current;
-      // Resume from the heard chunk only when the listener is still on its
-      // page; after a manual page flip, narration restarts from the visible page.
-      const useAnchor = !pending && anchor !== null && anchor.page === pageRef.current;
-      socket.send(
-        JSON.stringify({
-          type: "start",
-          chunk: pending?.chunk ?? (useAnchor ? anchor.id : undefined),
-          page: pending?.page ?? (useAnchor ? undefined : pageRef.current),
-          voice: voiceRef.current,
-          speed: rateRef.current,
-          emotion: emotionRef.current,
-        }),
-      );
+      if (socketRef.current !== socket) return;
+      socket.send(JSON.stringify({ type: "start", ...startPayload() }));
     };
     socket.onmessage = handleMessage;
     socket.onclose = () => {
@@ -281,16 +299,11 @@ export function useNarration({
         toast("Narration disconnected — press play to resume");
       }
     };
-  }, [bookId, handleMessage]);
+  }, [bookId, handleMessage, startPayload, ensureContext]);
 
   const play = useCallback(() => {
     wantsPlayRef.current = true;
-    let ctx = ctxRef.current;
-    if (!ctx || ctx.state === "closed") {
-      ctx = new AudioContext();
-      ctxRef.current = ctx;
-      nextTimeRef.current = ctx.currentTime;
-    }
+    const ctx = ensureContext();
     if (ctx.state === "suspended") {
       ctx.resume().catch(() => {});
     }
@@ -301,6 +314,9 @@ export function useNarration({
       setLoading(true);
       return;
     }
+    if (nextTimeRef.current <= ctx.currentTime + 0.05) {
+      setLoading(true); // nothing buffered yet; audio appears with first PCM
+    }
     // Resuming after the listener flipped to another page: restart there
     // instead of dragging them back to the previously heard chunk.
     const anchor = heardChunkRef.current;
@@ -310,7 +326,7 @@ export function useNarration({
       setLoading(true);
       socket.send(JSON.stringify({ type: "seek", page: pageRef.current }));
     }
-  }, [connect, flushAudio]);
+  }, [connect, flushAudio, ensureContext]);
 
   const pause = useCallback(() => {
     wantsPlayRef.current = false;
@@ -465,12 +481,19 @@ export function useNarration({
       flushAudio();
       setLoading(true);
       socket.send(JSON.stringify({ type: "seek", chunk: anchor.id }));
+    } else if (!wantsPlayRef.current) {
+      // Pre-play buffer holds the old rendition; rebuild it with new settings.
+      flushAudio();
+      socket.send(JSON.stringify({ type: "seek", page: pageRef.current }));
     }
   }, [voice, rate, emotion, enabled, flushAudio]);
 
   useEffect(() => {
-    if (!enabled) teardown();
-  }, [enabled, teardown]);
+    // Opening listen mode connects immediately in prepare mode, so the first
+    // chunk is already synthesized by the time play is pressed.
+    if (enabled) connect();
+    else teardown();
+  }, [enabled, connect, teardown]);
 
   useEffect(() => teardown, [teardown]);
 
